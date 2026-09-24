@@ -6,10 +6,13 @@ import type { AuditStore } from '../audit/store.js';
 import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
-import { CommandQuota } from '../policy/quota.js';
+import { CommandQuota, type QuotaReservation } from '../policy/quota.js';
 import type { LocalPathContext } from './local-path.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
+import { resolveProfileGroup } from '../policy/engine.js';
+import { mergeReview } from '../reviewer/decision.js';
+import type { CommandReviewer, ReviewResult } from '../reviewer/types.js';
 
 /**
  * What we know about a request while it is being processed, so a failure can be
@@ -25,6 +28,7 @@ export interface AuditState {
   command: string;
   /** Set once the policy engine actually produced a decision. */
   evaluation?: PolicyEvaluation;
+  review?: ReviewResult;
 }
 
 /** Policy never ran — the input was rejected at the boundary. */
@@ -37,7 +41,11 @@ function rejectedEvaluation(commandClass: CommandClass): PolicyEvaluation {
  * the real rule and class instead of a synthetic placeholder.
  */
 export class PolicyRefusedError extends Error {
-  constructor(message: string, readonly evaluation: PolicyEvaluation) {
+  constructor(
+    message: string,
+    readonly evaluation: PolicyEvaluation,
+    readonly review?: ReviewResult,
+  ) {
     super(message);
     this.name = 'PolicyRefusedError';
   }
@@ -50,6 +58,8 @@ export interface ToolDeps {
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
+  /** Optional contextual reviewer. Absent means the feature is disabled. */
+  reviewer?: CommandReviewer;
   /**
    * Where the streaming SFTP file tools may touch local disk, and which
    * directories they must stay clear of.
@@ -69,7 +79,7 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
-export function createPipeline({ server, registry, policy, audit, approvalGrantTtlMs = 0 }: ToolDeps) {
+export function createPipeline({ server, registry, policy, audit, reviewer, approvalGrantTtlMs = 0 }: ToolDeps) {
   const quota = new CommandQuota();
   const grants = new ApprovalGrants(approvalGrantTtlMs);
   async function resolveConn(profileName?: string) {
@@ -82,11 +92,12 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     toolName: string,
   ) {
     const span = tracer.startSpan('policy.evaluate');
+    let quotaReservation: QuotaReservation | undefined;
     span.setAttribute('tool.name', toolName);
     span.setAttribute('ssh.profile', profileName);
     try {
       const conn = await resolveConn(profileName);
-      const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
+      let evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
       span.setAttribute('command.binary', evaluation.binary);
@@ -98,14 +109,77 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         );
       }
 
+      const budget = quota.reserve(conn.profile.name, conn.profile.commandQuotaPerDay);
+      if (!budget.allowed) {
+        const retry = budget.retryAt
+          ? `Next slot frees at ${budget.retryAt.toISOString()}.`
+          : 'Retry after an in-flight command finishes.';
+        throw new PolicyRefusedError(
+          `QUOTA_EXCEEDED: profile "${conn.profile.name}" has used or reserved its ` +
+          `${conn.profile.commandQuotaPerDay} commands for the last 24h. ${retry}`,
+          { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
+        );
+      }
+      quotaReservation = budget.reservation;
+
+      let review: ReviewResult | undefined;
+      let requiresFreshApproval = false;
+      if (reviewer && evaluation.commandClass !== 'read-only') {
+        const reviewSpan = tracer.startSpan('reviewer.review');
+        const reviewStartedAt = Date.now();
+        try {
+          review = await reviewer.review({
+            command,
+            tool: toolName,
+            commandClass: evaluation.commandClass,
+            tier: resolveProfileGroup(conn.profile),
+            readOnly: conn.profile.readOnly,
+          });
+        } catch {
+          // The interface promises a result, but an injected implementation must not be
+          // able to throw past the safety gate and restore automatic execution.
+          review = {
+            status: 'unavailable',
+            verdict: 'escalate',
+            risk: 'unknown',
+            summary: 'Contextual reviewer unavailable; manual approval is required.',
+            findings: [],
+            policyVersion: 'unknown',
+            durationMs: Date.now() - reviewStartedAt,
+            unavailableCode: 'reviewer-threw',
+          };
+        } finally {
+          if (review) {
+            reviewSpan.setAttribute('review.status', review.status);
+            reviewSpan.setAttribute('review.risk', review.risk);
+            reviewSpan.setAttribute('review.duration_ms', review.durationMs);
+          }
+          reviewSpan.end();
+        }
+        const merged = mergeReview(evaluation, review);
+        evaluation = merged.evaluation;
+        requiresFreshApproval = merged.requiresFreshApproval;
+        span.setAttribute('policy.decision', evaluation.decision);
+        if (evaluation.decision === 'deny') {
+          throw new PolicyRefusedError(
+            `POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`,
+            evaluation,
+            review,
+          );
+        }
+        if (merged.approver) {
+          return { conn, evaluation, review, approver: merged.approver, quotaReservation };
+        }
+      }
+
       if (evaluation.decision === 'require-approval') {
         // A live grant from an earlier explicit approval of this exact command.
-        if (grants.has(conn.profile.name, command, evaluation.commandClass)) {
+        if (!requiresFreshApproval && grants.has(conn.profile.name, command, evaluation.commandClass)) {
           span.setAttribute('policy.grant', 'reused');
-          return { conn, evaluation, approver: 'jit-grant' };
+          return { conn, evaluation, review, approver: 'jit-grant', quotaReservation };
         }
 
-        const approval = await requestApproval(server, command, conn.profile.name, evaluation);
+        const approval = await requestApproval(server, command, conn.profile.name, evaluation, review);
         if (!approval.approved) {
           // Two different failures used to share one message. "User did not
           // approve" is true when the user declined and a lie when the client
@@ -115,13 +189,19 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
               ? `APPROVAL_UNAVAILABLE: ${approval.unavailable}`
               : 'APPROVAL_DENIED: User did not approve this command',
             evaluation,
+            review,
           );
         }
-        grants.record(conn.profile.name, command, evaluation.commandClass);
-        return { conn, evaluation, approver: approval.approver };
+        if (!requiresFreshApproval) {
+          grants.record(conn.profile.name, command, evaluation.commandClass);
+        }
+        return { conn, evaluation, review, approver: approval.approver, quotaReservation };
       }
 
-      return { conn, evaluation, approver: undefined };
+      return { conn, evaluation, review, approver: undefined, quotaReservation };
+    } catch (err) {
+      quota.release(quotaReservation);
+      throw err;
     } finally {
       span.end();
     }
@@ -134,6 +214,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     evaluation: PolicyEvaluation,
     result: CommandResult | { error: string },
     approver?: string,
+    review?: ReviewResult,
   ) {
     await audit.record({
       mcpRequestId: ctx.requestId,
@@ -153,6 +234,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       durationMs: 'durationMs' in result ? result.durationMs : undefined,
       error: 'error' in result ? result.error : undefined,
       approver,
+      review,
     });
   }
 
@@ -180,7 +262,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     try {
       await auditResult(ctx, profileName, state.command, evaluation, {
         error: err?.message ?? String(err),
-      });
+      }, undefined, err instanceof PolicyRefusedError ? err.review : state.review);
     } catch (auditErr) {
       console.error('Audit write failed while recording a tool failure:', auditErr);
     }
@@ -282,6 +364,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     // a server that has no config at all, used to leave none. The unconfigured refusal
     // reaches this the same way a bad command does.
     const state: AuditState = { command };
+    let quotaReservation: QuotaReservation | undefined;
     try {
       profileName = defaultProfileName(opts.profile);
       const profile = registry.getProfile(profileName);
@@ -295,24 +378,20 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         state.command = effective;
       }
 
-      const { conn, evaluation, approver } = await checkPolicyAndApprove(effective, profileName, opts.toolName);
+      const checked = await checkPolicyAndApprove(effective, profileName, opts.toolName);
+      const { conn, evaluation, review, approver } = checked;
+      quotaReservation = checked.quotaReservation;
       state.evaluation = evaluation;
+      state.review = review;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
         throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
       }
 
-      // Counted after the policy allowed it and before it runs: a denied
-      // command should not burn quota, and an allowed one should be counted
-      // even if it later fails on the host — the work was still spent.
-      const budget = quota.consume(profileName, profile.commandQuotaPerDay);
-      if (!budget.allowed) {
-        throw new PolicyRefusedError(
-          `QUOTA_EXCEEDED: profile "${profileName}" has used its ${profile.commandQuotaPerDay} commands ` +
-          `for the last 24h. Next slot frees at ${budget.retryAt?.toISOString()}.`,
-          { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
-        );
-      }
+      // The slot was reserved before reviewer/approval work so exhausted or
+      // concurrent requests cannot keep spending model calls. Commit only now:
+      // policy/approval refusals still spend nothing, while remote failures do.
+      quota.commit(quotaReservation);
 
       const approved = effective;
       const refineCommand = (refined: string) => {
@@ -330,9 +409,10 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       // `state.command`, not `effective`: identical unless the handler refined
       // it, and the refinement is exactly what the success record should carry.
       // The failure path below already reads `state`, so the two agree.
-      await auditResult(ctx, profileName, state.command, evaluation, audited, approver);
+      await auditResult(ctx, profileName, state.command, evaluation, audited, approver, review);
       return output;
     } catch (err: any) {
+      quota.release(quotaReservation);
       await auditFailure(ctx, profileName, state, opts.failureClass, err);
       throw err;
     }
