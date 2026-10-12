@@ -166,3 +166,6 @@ sonar-project.properties
 # plan and raw verification evidence stay local by repository policy.
 /docs/features/*/plan.md
 /docs/features/*/evidence.md
+
+# Opt-in live reviewer evaluation output (may contain model-generated findings).
+/artifacts/reviewer-eval/

@@ -682,11 +682,12 @@ set; the CLI value takes precedence. Local policy and OPA remain the enforcement
 point: their denials are final and are never sent to the reviewer. Read-only
 operations and `close-session` also skip review. For other operations, `low`
 is paired with `approve`, `high` with `deny`, and uncertain cases use
-`escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` or
-`ask-destructive` soft approval and records `approver: "llm-reviewer"`; deny
+`escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` soft
+approval for a deterministically `safe` operation and records
+`approver: "llm-reviewer"`; deny
 recommends rejection and requests fresh human approval; escalate also requests
-fresh human approval. No LLM verdict is a final refusal. Privileged operations
-remain human-only even when the model approves. An invalid response,
+fresh human approval. No LLM verdict is a final refusal. Destructive and privileged
+operations remain human-only even when the model approves. An invalid response,
 timeout or outage is treated as escalation, and escalated approval cannot reuse
 a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
 
@@ -698,10 +699,12 @@ and findings are strictly bounded and redacted again before appearing in an
 approval prompt or audit record.
 
 The independent sidecar accepts `GET /healthz` and `POST /v1/review`. It requires
-`LLM_BASE_URL` and `LLM_MODEL`; `LLM_API_KEY` is optional. `LLM_TIMEOUT_MS`
-defaults to 25000 and must be lower than ssh-mcp's reviewer timeout. It uses the
-OpenAI-compatible `chat/completions` JSON interface with no tools, no retry and
-temperature zero. The response is strict schema-versioned JSON containing
+`LLM_BASE_URL` and `LLM_MODEL`; `LLM_API_KEY` is optional. `LLM_PROTOCOL` selects
+`chat-completions` (the default) or `responses`. `LLM_TIMEOUT_MS` defaults to
+25000 and must be lower than ssh-mcp's reviewer timeout. Both protocols use
+OpenAI-compatible JSON mode with no tools, no retry and temperature zero. The sidecar
+includes the JSON Schema generated from its Zod validator in the fixed system prompt. The
+response is strict schema-versioned JSON containing
 `verdict`, `risk`, bounded summary/findings, model and reviewer policy version;
 contradictory verdict/risk pairs are rejected. No model is selected by default.
 
@@ -719,6 +722,71 @@ For vLLM, point `LLM_BASE_URL` at its `/v1` endpoint. For a cloud
 OpenAI-compatible service, use its `/v1` URL and set `LLM_API_KEY` in the
 reviewer environment. To turn review off, omit the `reviewer` profile and unset
 `SSH_MCP_REVIEWER_URL`.
+
+For Zhipu GLM through its OpenAI Responses-compatible endpoint:
+
+```bash
+export SSH_MCP_REVIEWER_URL=http://llm-reviewer:8080
+export LLM_BASE_URL=https://open.bigmodel.cn/api/v1
+export LLM_PROTOCOL=responses
+export LLM_MODEL=glm-5.3
+export LLM_API_KEY=your-zhipu-api-key
+export LLM_TIMEOUT_MS=25000
+docker compose --profile app --profile reviewer up --build
+```
+
+### Reviewer quality evaluation
+
+The normal test suite uses a deterministic fake model and verifies protocol and policy
+boundaries. The opt-in evaluator combines a 150-case project-native core with the complete,
+pinned 34,007-row Shell Safety v2 corpus. Each run selects a bounded, verdict-balanced
+sample across source splits, shells, categories and reasons. Dry-run validation is local
+and free:
+
+```bash
+npm run eval:reviewer -- --dry-run
+
+# Reproduce an exact 30-case selection.
+npm run eval:reviewer -- --dry-run --sample-size 30 --core-size 6 --seed release-candidate-1
+```
+
+Live evaluation is opt-in and never executes the commands in the dataset. It starts an
+ephemeral reviewer from the local `.env`, writes mode-0600 raw results under the ignored
+`artifacts/reviewer-eval/` directory, and reports raw model unsafe approval separately
+from the effective unsafe and safe auto-approval rates after the production `safe`-only
+gate. It also reports safe false-escalation, exact verdict/risk, availability,
+consistency and latency metrics:
+
+```bash
+# Small stratified smoke run: one approve, one escalate and one deny case.
+npm run eval:reviewer -- --live --env-file .env \
+  --sample-size 3 --core-size 1 --seed smoke-1 \
+  --sidecar-timeout-ms 110000 --concurrency 1
+
+# Default release-sized sample: 50 native and 250 compatible external cases.
+npm run eval:reviewer -- --live --env-file .env \
+  --seed release-2026-09-28 \
+  --sidecar-timeout-ms 110000 --concurrency 1
+```
+
+Use `--repeat 3` for a smaller release-gate subset when consistency matters, and `--tag`
+to isolate groups such as `prompt-injection`, `native` or `shell-safety-v2`. The evaluator
+generates and prints a random seed when `--seed` is omitted. Raw metadata records that
+seed, the pinned dataset revision, selection fingerprint and every selected case ID.
+The command class sent to the reviewer and stored with each result is recomputed by the
+production classifier; project-native cases fail validation if their declared class has
+drifted from that classifier.
+Unavailable attempts also record a bounded failure category such as
+`upstream-http-error`, `invalid-model-json`, `invalid-model-schema` or
+`inconsistent-verdict-risk`; provider bodies, model output, credentials and endpoint
+details are never copied into the result. A sidecar failure response retains the compatible
+`error: "model review unavailable"` field and adds the stable `category`, a safe human-readable
+`message`, and `upstreamStatus` only for upstream HTTP failures. An
+`invalid-model-schema` response additionally includes bounded `schemaIssue` and
+`schemaField` codes, never the rejected value or raw model output. The evaluator preserves
+and summarizes those codes. The complete corpus is
+validated before the first provider request. See
+`test/eval/reviewer/README.md` for data provenance and limitations.
 
 ---
 

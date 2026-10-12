@@ -848,6 +848,50 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Recognised high-impact operations that must never inherit the catch-all `safe`
+ * classification used for ordinary unknown commands.
+ *
+ * This is deliberately about operation families, not the spelling of one benchmark
+ * command. `effectiveCommandIndex` reads through wrappers and quote removal, and every
+ * segment is checked, so `env systemctl restart x` and a piped PowerShell `Export-Csv`
+ * reach the same answer as their direct forms.
+ */
+function hasHighImpactInvocation(command: string): boolean {
+  for (const { words } of tokenizeSegmentsDetailed(command)) {
+    const index = effectiveCommandIndex(words);
+    if (index === -1) continue;
+    const binary = stripPath(unquote(words[index])).toLowerCase();
+    const args = words.slice(index + 1).map((word) => unquote(word));
+    const lowerArgs = args.map((word) => word.toLowerCase());
+    const invokes = (names: string[]) => names.some((name) => lowerArgs.includes(name));
+    const joinedArgs = args.join(' ');
+
+    if (binary === 'curl' || binary === 'wget') return true;
+    if (binary === 'kill' || binary === 'killall' || binary === 'pkill') return true;
+    if (binary === 'chmod' || binary === 'chown' || binary === 'chgrp') return true;
+    if (binary === 'rm') return true;
+    if (binary === 'export-csv') return true;
+    if (binary === 'npm' && invokes(['install', 'uninstall', 'update', 'publish'])) return true;
+    if (binary === 'yarn' && invokes(['add', 'remove', 'upgrade', 'publish'])) return true;
+    if (binary === 'pnpm' && invokes(['add', 'install', 'remove', 'update', 'publish'])) return true;
+    if (binary === 'pip' || binary === 'pip3') return true;
+    if (binary === 'apt' || binary === 'apt-get' || binary === 'dnf' || binary === 'yum' || binary === 'apk') return true;
+    if (binary === 'systemctl' && invokes([
+      'start', 'stop', 'restart', 'reload', 'enable', 'disable', 'mask', 'unmask',
+    ])) return true;
+    if (binary === 'kubectl' && invokes([
+      'apply', 'create', 'delete', 'edit', 'exec', 'patch', 'replace', 'rollout',
+      'scale', 'set', 'taint', 'cordon', 'uncordon', 'drain',
+    ])) return true;
+    if (binary === 'git' && invokes(['push', 'reset', 'clean', 'rebase'])) return true;
+    if ((binary === 'psql' || binary === 'mysql' || binary === 'sqlite3') &&
+      /\b(?:alter|create|delete|drop|grant|insert|reindex|revoke|truncate|update)\b/i.test(joinedArgs)) return true;
+    if (['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash'].includes(binary) && args.includes('-i')) return true;
+  }
+  return false;
+}
+
+/**
  * Everything that classifies as destructive: forbidden commands included.
  *
  * Goes through isForbidden() rather than the regex list, so a command caught by
@@ -858,6 +902,7 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
 function isDestructive(command: string): boolean {
   return (
     isForbidden(command) ||
+    hasHighImpactInvocation(command) ||
     matchesEitherForm(command, (form) => DESTRUCTIVE_PATTERNS.some((re) => re.test(form)))
   );
 }

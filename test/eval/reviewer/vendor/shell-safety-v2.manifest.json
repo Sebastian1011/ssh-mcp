@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "source": "tomngdev/shell-safety-v2",
+  "revision": "3258db497dae218f23d1d648ef2eb7cb6ab5e70c",
+  "license": "MIT",
+  "sourceFiles": {
+    "train.jsonl": {
+      "records": 30002,
+      "sha256": "698e5ba9cf4984d4fcd845f997e63a8a971ceea71a3b22dcf257379d6e0972ef"
+    },
+    "validation.jsonl": {
+      "records": 3002,
+      "sha256": "ebb74c92b5b879d06af75d2cb456feb0f314c2ae270eb9aa79353c67f364e830"
+    },
+    "test.jsonl": {
+      "records": 1003,
+      "sha256": "23b5c0d32e2d558550b14885580194d3dbb9c4f6810acab14e03d9cdfaa341e8"
+    }
+  },
+  "records": 34007,
+  "labels": {
+    "allow": 13600,
+    "ask": 12509,
+    "deny": 7898
+  },
+  "splits": {
+    "train": 30002,
+    "validation": 3002,
+    "test": 1003
+  },
+  "archive": {
+    "file": "shell-safety-v2.jsonl.gz",
+    "sha256": "db11c4cc0469b4cd9564f66f031264a4105116fc4e3ac87a8e8156db3b81172d",
+    "uncompressedSha256": "c886a557eb7bcdfeaf3b204691bfd2c96c1bed38b3e508111e2b6e4d6327bdef",
+    "bytes": 4106790,
+    "uncompressedBytes": 27377846
+  }
+}

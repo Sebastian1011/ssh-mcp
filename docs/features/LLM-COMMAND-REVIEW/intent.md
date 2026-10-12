@@ -14,6 +14,10 @@ external policy and human approval, but frequent prompts make routine remote ope
 expensive. Operators need a contextual reviewer to make most bounded decisions itself,
 while deterministic permissions continue to cap what any reviewer may authorize.
 
+Protocol and integration tests alone do not show whether a configured model distinguishes
+safe, uncertain and clearly unsafe operations reliably. Operators also need a repeatable,
+versioned quality evaluation before changing a model, prompt or provider.
+
 ## Proposed outcome
 
 Operators can optionally enable a contextual reviewer for non-read-only operations. Inside
@@ -33,12 +37,18 @@ not a final refusal. Configured production freeze windows remain hard denials.
 - No reviewer verdict can create a final denial; `deny`, `escalate` and reviewer failure
   all require fresh human review.
 - Reviewer failure escalates rather than silently restoring automatic execution.
-- Deterministic policy identifies the maximum authority and reviewer-bypassable soft
-  approvals; privileged operations remain human-only.
+- Deterministic classification identifies the maximum authority and reviewer-bypassable
+  soft approvals; only `safe` operations may be auto-approved. Destructive and privileged
+  operations remain human-only even when the reviewer returns approve.
 - Command secrets must be redacted before leaving the ssh-mcp process.
 - Read-only operations and the non-refusable session-release path retain their current behavior.
 - Existing deployments remain unchanged unless the reviewer is explicitly enabled.
 - The reviewer receives no SSH credentials, command input, command output or file content.
+- Paid, slow or nondeterministic model evaluation must remain opt-in and outside normal CI.
+- The complete attributed external corpus must be available offline, while each live run
+  evaluates only a bounded, reproducible, stratified sample.
+- Reviewer failures must expose a bounded diagnostic category without exposing credentials,
+  provider response bodies, model output or endpoint details.
 
 ## Out of scope
 
@@ -47,6 +57,7 @@ not a final refusal. Configured production freeze windows remain hard denials.
 - Reviewing read-only operations, command output, uploaded content or user intent.
 - Reviewer caching, retries, shadow mode, model tools or service-to-service authentication.
 - Replacing the existing classifier, role policy or OPA integration.
+- Treating an external synthetic dataset as authoritative without project-specific review.
 
 ## Open questions
 

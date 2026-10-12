@@ -162,6 +162,26 @@ describe('contextual reviewer in the tool pipeline', () => {
     });
   });
 
+  it('keeps destructive operations human-only after an LLM approval', async () => {
+    const r = reviewer();
+    h = await createHarness({}, { reviewer: r });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+    });
+  });
+
+  it('raises an otherwise automatic destructive operation to human approval', async () => {
+    const r = reviewer();
+    h = await createHarness({ approvalPolicy: 'auto' }, { reviewer: r });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl reload demo' } });
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+    });
+  });
+
   it.each([
     ['signal-process', { pid: 42, signal: 'TERM' }],
     ['open-session', { name: 'work', type: 'interactive' }],

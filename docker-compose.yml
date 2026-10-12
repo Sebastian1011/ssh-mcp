@@ -114,6 +114,7 @@ services:
     environment:
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_PROTOCOL=${LLM_PROTOCOL:-chat-completions}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_TIMEOUT_MS=${LLM_TIMEOUT_MS:-25000}
       - REVIEWER_PORT=8080
