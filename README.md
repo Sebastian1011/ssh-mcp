@@ -680,16 +680,23 @@ ssh-mcp --reviewerUrl=http://127.0.0.1:8080 --reviewerTimeoutMs=30000
 Review is disabled when neither `--reviewerUrl` nor `SSH_MCP_REVIEWER_URL` is
 set; the CLI value takes precedence. Local policy and OPA remain the enforcement
 point: their denials are final and are never sent to the reviewer. Read-only
-operations and `close-session` also skip review. For other operations, `low`
-is paired with `approve`, `high` with `deny`, and uncertain cases use
+operations already allowed by policy and `close-session` skip review. Read-only
+operations requiring soft approval, such as under `ask-all`, are reviewed. For
+reviewed operations, `low` is paired with `approve`, `high` with `deny`, and uncertain cases use
 `escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` soft
-approval for a deterministically `safe` operation and records
+approval for a read-only or deterministically `safe` operation and records
 `approver: "llm-reviewer"`; deny
 recommends rejection and requests fresh human approval; escalate also requests
 fresh human approval. No LLM verdict is a final refusal. Destructive and privileged
 operations remain human-only even when the model approves. An invalid response,
 timeout or outage is treated as escalation, and escalated approval cannot reuse
 a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
+
+The `safe` class is a command-text classification, not a guarantee about a
+program's effects. Unknown binaries and some file-writing commands currently
+fall into `safe`; for example, `./deploy.sh` and `cp` are not inherently bounded
+by that label. Keep non-read-only production profiles disabled until their
+auto-approval scope has been reviewed against the commands they will actually run.
 
 Before transmission, commands are scanned for known secrets and high-entropy
 values. The request contains only the schema version, tool, command class,
@@ -878,6 +885,51 @@ For remote/web clients behind a reverse proxy with TLS:
 ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret
 ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 ```
+
+For a local Docker Compose deployment using the profiles in `prod_config/ssh-mcp/config.toml`,
+use `prod_config/compose.yaml` with `prod_config/compose.env`. It binds the HTTP
+port to `127.0.0.1:3000`, mounts the current
+SSH agent socket, and reads a bearer token from `prod_config/ssh-mcp/http-token` through
+`SSH_MCP_BEARER_TOKEN_FILE` instead of putting the token in process arguments. The token
+file and `prod_config/ssh-mcp-audit/` are ignored by Git. The isolated `llm-reviewer`
+has no host port or SSH mount; configure `LLM_BASE_URL`, `LLM_MODEL`, and any required
+`LLM_API_KEY` in the ignored `prod_config/compose.env` file before startup. The
+default model timeout
+is 110 seconds and the MCP reviewer timeout is 120 seconds; a value set by
+`LLM_TIMEOUT_MS` in `prod_config/compose.env` overrides the model timeout. Its
+`/healthz` checks the
+sidecar process, not model connectivity. Create the token file with
+mode 0600 and the audit directory with mode 0700 before starting the service. Recreate
+the container when `SSH_AUTH_SOCK` changes, since the bind mount captures its old socket.
+The agent must hold a key accepted by the configured host; a successful host `ssh` command
+may instead have used its local identity file. Start with:
+
+```bash
+# Set SSH_AUTH_SOCK in prod_config/compose.env to the agent socket for these profiles.
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml up -d --build
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml ps
+```
+
+Both services should be healthy. A healthy reviewer only proves its HTTP process is
+running; validate the configured model separately before relying on review:
+
+```bash
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml exec -T ssh-mcp node --input-type=module -e '
+import { HttpCommandReviewer } from "./build/reviewer/http-client.js";
+const result = await new HttpCommandReviewer("http://llm-reviewer:8080", 120000)
+  .review({ command: "echo deployment-review-probe", tool: "run-command",
+            commandClass: "safe", tier: "prod", readOnly: false });
+console.log({ status: result.status, verdict: result.verdict, model: result.model,
+              unavailableCode: result.unavailableCode });
+if (result.status !== "completed") process.exitCode = 1;
+'
+```
+
+This sends a synthetic review request but executes no SSH command. With the
+current six read-only `ask-all` profiles, a read-only command can run without a
+manual prompt when the reviewer approves it. A deny, escalation, or unavailable
+reviewer requests fresh human approval. Enabling non-read-only operations requires
+a separate, deliberate policy change.
 
 | Flag | Default | Description |
 |------|---------|-------------|

@@ -124,7 +124,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
 
       let review: ReviewResult | undefined;
       let requiresFreshApproval = false;
-      if (reviewer && evaluation.commandClass !== 'read-only') {
+      if (reviewer && (evaluation.commandClass !== 'read-only' || evaluation.decision === 'require-approval')) {
         const reviewSpan = tracer.startSpan('reviewer.review');
         const reviewStartedAt = Date.now();
         try {

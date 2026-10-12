@@ -16,6 +16,7 @@ test
 coverage
 .env*
 build
+prod_config
 *.tgz
 .claude
 .opencode

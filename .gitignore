@@ -169,3 +169,5 @@ sonar-project.properties
 
 # Opt-in live reviewer evaluation output (may contain model-generated findings).
 /artifacts/reviewer-eval/
+/prod_config/*
+!/prod_config/compose.yaml

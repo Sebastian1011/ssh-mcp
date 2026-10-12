@@ -5,17 +5,19 @@ status: accepted
 branch: feat/llm-command-review
 ---
 
-# Spec: contextual review for non-read-only operations
+# Spec: contextual review for operations requiring approval
 
 ## Requirements
 
 1. Review is disabled unless an operator configures a valid HTTP(S) reviewer URL.
 2. Local policy and OPA denials remain final and do not call the reviewer.
-3. Every policy-allowed operation whose final command class is not `read-only` is reviewed,
-   except session release, which remains non-refusable.
+3. Every policy-allowed operation whose final command class is not `read-only` is reviewed.
+   A read-only operation is reviewed only when deterministic policy requires approval.
+   Session release remains non-refusable and skips review.
 4. A completed review returns `approve`, `deny` or `escalate`: approve may discharge a
-   soft approval only for a deterministically `safe` operation; deny recommends rejection
-   and requires a human; escalate also requires a human. No LLM verdict is a final refusal.
+   soft approval only for a deterministically `safe` or read-only operation; deny
+   recommends rejection and requires a human; escalate also requires a human.
+   No LLM verdict is a final refusal.
 5. Review can never change a deterministic deny. Destructive and privileged operations
    remain human-only even when review says approve.
 6. Reviewer-escalated and human-only approvals are never satisfied by a JIT grant.
@@ -65,8 +67,9 @@ to a bounded internal `ReviewResult`. Transport or validation failures create an
 `unavailable` result rather than throwing past the policy gate.
 
 The merge is a pure function. A deterministic `deny` is returned unchanged. On a `safe`
-operation, approve returns allow with an LLM approver; reviewer deny, escalate and
-unavailable all require fresh human approval with distinct rule identifiers. Destructive
+or read-only operation requiring approval, approve returns allow with an LLM
+approver; reviewer deny, escalate and unavailable all require fresh human approval
+with distinct rule identifiers. Destructive
 and privileged operations are human-only: approve preserves or raises human approval.
 The pipeline carries the review verdict into elicitation and audit; every remaining prompt
 bypasses the JIT grant cache.
@@ -127,8 +130,11 @@ No `docs/architecture/` document currently exists for these modules.
 - Reviewer denial still costs human attention, but cannot block legitimate work without a
   person confirming the refusal by declining the approval prompt.
 - Autonomous approval reduces prompts but is bounded by role permissions, hard rules,
-  freeze windows and the `safe` command class. Destructive and privileged classes are
+  freeze windows and the `safe` or read-only command class. Destructive and privileged classes are
   human-only.
+- The classifier's fallback `safe` class includes unknown binaries and some
+  file-writing commands. This is a remaining auto-approval risk for any
+  non-read-only profile; such deployment needs a separately reviewed scope.
 - Session release is intentionally excluded because refusing it can leave a remote command
   running.
 - Live model scores are provider-, model- and prompt-version specific. They are recorded as
@@ -146,11 +152,11 @@ No `docs/architecture/` document currently exists for these modules.
 ## Acceptance criteria
 
 - Type checking, unit/property, integration and end-to-end suites pass.
-- Tests prove hard denials cannot be widened, approve discharges only `safe` soft
+- Tests prove hard denials cannot be widened, approve discharges only `safe` or read-only soft
   approvals, reviewer deny/escalation/failure prompt freshly, and destructive and
   privileged operations remain human-only.
 - Tests prove freeze windows, cross-midnight behavior, time zones, invalid configuration,
-  read-only exemption and reviewer short-circuiting.
+  already allowed read-only exemption and reviewer short-circuiting.
 - A deterministic fake model covers the sidecar's success and failure contract.
 - Both Docker targets build and Compose validates without publishing the reviewer port.
 - The evaluation dataset validates without network access and contains balanced approve,

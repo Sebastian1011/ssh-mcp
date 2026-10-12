@@ -1,0 +1,62 @@
+name: ssh-mcp
+
+services:
+  ssh-mcp:
+    image: ssh-mcp:prod-local
+    build:
+      context: ..
+      target: ssh-mcp
+    user: "${SSH_MCP_UID:-1000}:${SSH_MCP_GID:-1000}"
+    init: true
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      HOME: /tmp
+      XDG_DATA_HOME: /data
+      SSH_AUTH_SOCK: /run/ssh-agent.sock
+      SSH_MCP_BEARER_TOKEN_FILE: /config/http-token
+      SSH_MCP_REVIEWER_URL: http://llm-reviewer:8080
+    depends_on:
+      llm-reviewer:
+        condition: service_healthy
+    volumes:
+      - ./ssh-mcp:/config:ro
+      - ./ssh-mcp-audit:/data/ssh-mcp
+      - ${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must point to a running SSH agent}:/run/ssh-agent.sock
+    tmpfs:
+      - /tmp:mode=1777
+    command:
+      - --config=/config/config.toml
+      - --transport=http
+      - --httpHost=0.0.0.0
+      - --httpPort=3000
+      - --reviewerTimeoutMs=120000
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(async r => { const x = await r.json(); process.exit(r.ok && x.configured ? 0 : 1); }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  llm-reviewer:
+    image: ssh-mcp-reviewer:prod-local
+    build:
+      context: ..
+      target: reviewer
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:?LLM_BASE_URL is required}
+      LLM_MODEL: ${LLM_MODEL:?LLM_MODEL is required}
+      LLM_PROTOCOL: ${LLM_PROTOCOL:-chat-completions}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-110000}
+      REVIEWER_PORT: 8080
+    tmpfs:
+      - /tmp:mode=1777

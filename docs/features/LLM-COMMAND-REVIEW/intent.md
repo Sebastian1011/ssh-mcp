@@ -5,7 +5,7 @@ status: accepted
 branch: feat/llm-command-review
 ---
 
-# Intent: add contextual safety review before non-read-only remote operations
+# Intent: add contextual safety review before remote operations requiring approval
 
 ## Problem
 
@@ -20,7 +20,7 @@ versioned quality evaluation before changing a model, prompt or provider.
 
 ## Proposed outcome
 
-Operators can optionally enable a contextual reviewer for non-read-only operations. Inside
+Operators can optionally enable a contextual reviewer for operations requiring approval. Inside
 the envelope allowed by deterministic policy it may approve routine operations or send
 risky and uncertain cases to a person. A reviewer `deny` is advice to reject and escalate,
 not a final refusal. Configured production freeze windows remain hard denials.
@@ -38,10 +38,11 @@ not a final refusal. Configured production freeze windows remain hard denials.
   all require fresh human review.
 - Reviewer failure escalates rather than silently restoring automatic execution.
 - Deterministic classification identifies the maximum authority and reviewer-bypassable
-  soft approvals; only `safe` operations may be auto-approved. Destructive and privileged
-  operations remain human-only even when the reviewer returns approve.
+  soft approvals; `safe` operations and reviewed read-only commands may be
+  auto-approved. Destructive and privileged operations remain human-only even
+  when the reviewer returns approve.
 - Command secrets must be redacted before leaving the ssh-mcp process.
-- Read-only operations and the non-refusable session-release path retain their current behavior.
+- Already allowed read-only operations and the non-refusable session-release path retain their current behavior.
 - Existing deployments remain unchanged unless the reviewer is explicitly enabled.
 - The reviewer receives no SSH credentials, command input, command output or file content.
 - Paid, slow or nondeterministic model evaluation must remain opt-in and outside normal CI.
@@ -54,7 +55,7 @@ not a final refusal. Configured production freeze windows remain hard denials.
 
 - Allowing contextual review to override a deterministic denial.
 - Allowing contextual review to authorize privileged operations.
-- Reviewing read-only operations, command output, uploaded content or user intent.
+- Reviewing already allowed read-only operations, command output, uploaded content or user intent.
 - Reviewer caching, retries, shadow mode, model tools or service-to-service authentication.
 - Replacing the existing classifier, role policy or OPA integration.
 - Treating an external synthetic dataset as authoritative without project-specific review.

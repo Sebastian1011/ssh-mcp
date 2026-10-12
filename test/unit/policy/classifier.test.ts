@@ -184,9 +184,12 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
     expect(classifyCommand('echo hi; su-exec deploy id').class).toBe('privileged');
   });
 
-  // The reason this is a list and not a pattern: `sudo*` would swallow both.
-  it('still does not treat sudoedit or an unrelated binary as elevation', () => {
-    expect(classifyCommand('sudoedit /etc/hosts').class).toBe('safe');
+  // sudoedit updates the target file through sudo; a `sudo*` pattern would
+  // also swallow unrelated program names.
+  it('treats sudoedit as privileged without matching unrelated binaries', () => {
+    expect(classifyCommand('sudoedit /etc/hosts').class).toBe('privileged');
+    expect(classifyCommand('env sudoedit /etc/hosts').class).toBe('privileged');
+    expect(classifyCommand('echo ok; sudoedit /etc/hosts').class).toBe('privileged');
     expect(classifyCommand('subl file.txt').class).toBe('safe');
     expect(classifyCommand('sudoku').class).toBe('safe');
   });

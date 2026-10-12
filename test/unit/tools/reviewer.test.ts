@@ -29,6 +29,33 @@ describe('contextual reviewer in the tool pipeline', () => {
     expect(r.review).not.toHaveBeenCalled();
   });
 
+  it('lets reviewer approval discharge ask-all for a read-only command', async () => {
+    const r = reviewer();
+    h = await createHarness({ readOnly: true, approvalPolicy: 'ask-all' }, { reviewer: r });
+    await h.client.callTool({ name: 'read-command', arguments: { command: 'ls -la' } });
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(r.review).toHaveBeenCalledWith(expect.objectContaining({
+      commandClass: 'read-only', readOnly: true,
+    }));
+    expect(h.approvalPrompts()).toBe(0);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'allow', approver: 'llm-reviewer',
+      review: { status: 'completed', verdict: 'approve', risk: 'low' },
+    });
+  });
+
+  it('requires fresh human approval when reviewer rejects a read-only ask-all command', async () => {
+    const r = reviewer({ verdict: 'deny', risk: 'high' });
+    h = await createHarness({ readOnly: true, approvalPolicy: 'ask-all' }, { reviewer: r });
+    await h.client.callTool({ name: 'read-command', arguments: { command: 'ls -la' } });
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'require-approval', ruleId: 'llm-reviewer-deny-escalate',
+      approver: 'mcp-client',
+    });
+  });
+
   it('skips commands denied by deterministic policy', async () => {
     const r = reviewer();
     h = await createHarness({}, { reviewer: r });

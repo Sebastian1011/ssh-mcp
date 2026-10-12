@@ -86,12 +86,14 @@ role = "admin"
 group = "dev"
 `, 'utf8');
   await chmod(configPath, 0o600);
+  const tokenPath = join(dir, 'http-token');
+  await writeFile(tokenPath, `${BEARER}\n`, { mode: 0o600 });
 
   const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
   child = spawn('node', [
     SERVER_ENTRY, `--config=${configPath}`, '--insecureHostKey',
-    '--transport=http', `--httpPort=${PORT}`, `--bearerToken=${BEARER}`,
-  ], { env: { ...env, SSH_MCP_ADMIN_PASSWORD: 'secret' } as Record<string, string>, stdio: 'pipe' });
+    '--transport=http', `--httpPort=${PORT}`,
+  ], { env: { ...env, SSH_MCP_ADMIN_PASSWORD: 'secret', SSH_MCP_BEARER_TOKEN_FILE: tokenPath } as Record<string, string>, stdio: 'pipe' });
 
   // Wait for the listener rather than sleeping a fixed amount.
   await new Promise<void>((resolve, reject) => {

@@ -2,6 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readFile } from 'node:fs/promises';
 import { reportFatal, OperatorError } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
@@ -109,10 +110,19 @@ async function main() {
 
   if (transportMode === 'http') {
     const { startHttpServer } = await import('./transport/http.js');
+    const tokenFile = process.env.SSH_MCP_BEARER_TOKEN_FILE;
+    let bearerToken = argv.bearerToken as string | undefined;
+    if (!bearerToken && tokenFile) {
+      try {
+        bearerToken = (await readFile(tokenFile, 'utf8')).trim();
+      } catch (err) {
+        throw new OperatorError(`Cannot read SSH_MCP_BEARER_TOKEN_FILE: ${(err as Error).message}`);
+      }
+    }
     await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
-      bearerToken: argv.bearerToken as string | undefined,
+      bearerToken,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
       authFailureLimit: parseFailureLimit(argv.authFailureLimit),
       trustProxy: flagEnabled(argv, 'trustProxy'),

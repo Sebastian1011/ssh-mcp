@@ -16,7 +16,8 @@ alone therefore cannot be the production authorization boundary.
 
 - Deterministic denials remain final and skip contextual review.
 - A completed `approve` review may discharge a soft approval only when the final command
-  class is `safe`.
+  class is `safe`, or when the command is `read-only` and deterministic policy still
+  requires approval (for example, under `ask-all`). Already allowed reads skip review.
 - `destructive` and `privileged` operations always require fresh human approval, even when
   the reviewer returns `approve` with low risk. JIT grants do not satisfy that escalation.
 - Command families demonstrated by the project-native safety corpus to have material
@@ -32,7 +33,7 @@ agent-reviewable. Its remaining isolation, escalation and auditing decisions sti
 
 - A model mistake cannot automatically execute an operation already recognized as
   destructive or privileged.
-- Routine `safe` operations can still complete without a prompt under `ask-all`.
+- Routine `safe` and reviewed `read-only` operations can complete without a prompt under `ask-all`.
 - Classifier coverage is security-critical and must be regression-tested against the
   project-native reviewer corpus.
 - False-destructive classifications add a human prompt; they do not block an authorized

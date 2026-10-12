@@ -162,9 +162,10 @@ const ACTION_MULTIPLEXERS = new Set(['systemctl', 'init', 'telinit']);
  * Binaries that run the rest of the command as another user.
  *
  * The list is explicit rather than a pattern, because a pattern cannot tell
- * `sudoedit` — which edits a file and is not elevation — from `sudo-rs`, which
- * is sudo. It has to be maintained by hand as new implementations appear; the
- * cost of missing one is that its commands classify `safe`.
+ * `sudoedit` — a privileged file editor, handled separately below — from
+ * `sudo-rs`, which runs another command. It has to be maintained by hand as
+ * new implementations appear; the cost of missing one is that its commands
+ * classify `safe`.
  *
  * The last five were added in 2.2.5 (#132). Until 2.2.4 the check was
  * `/^\s*su\b/` and friends, and `\b` matched between `su` and the hyphen, so
@@ -655,6 +656,11 @@ function elevatedBinary(words: string[]): string | null {
   while (i < words.length) {
     const raw = words[i];
     const word = stripPath(unquote(raw));
+
+    // sudoedit updates a protected target file through sudo even though its
+    // editor process runs as the invoking user. The target is a file, not a
+    // command to scan past as with the prefixes below.
+    if (word === 'sudoedit') return word;
 
     if (PRIVILEGE_PREFIXES.has(word)) {
       prefix ??= word;

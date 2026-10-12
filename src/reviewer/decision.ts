@@ -10,8 +10,8 @@ export interface ReviewMerge {
 
 /**
  * Let the contextual reviewer resolve only decisions that passed deterministic
- * authorization and were classified safe. Destructive and privileged operations
- * remain human-only even when approved.
+ * authorization and were classified read-only or safe. Destructive and privileged
+ * operations remain human-only even when approved.
  */
 export function mergeReview(
   evaluation: PolicyEvaluation,
