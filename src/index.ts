@@ -2,6 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readFile } from 'node:fs/promises';
 import { reportFatal, OperatorError } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
@@ -19,8 +20,11 @@ import {
   parseFailureLimit,
   parseOpaUrl,
   parseOpaTimeout,
+  parseReviewerUrl,
+  parseReviewerTimeout,
   resolveHostKeyMode,
 } from './cli.js';
+import { HttpCommandReviewer } from './reviewer/http-client.js';
 
 async function main() {
   const argv = parseArgv();
@@ -54,6 +58,7 @@ async function main() {
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
+  let reviewer: HttpCommandReviewer | undefined;
 
   if ('opaUrl' in argv) {
     // Presence, not truthiness — the trap `flagEnabled` was written for. A
@@ -69,6 +74,22 @@ async function main() {
     throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
+  const reviewerUrlRaw = 'reviewerUrl' in argv
+    ? argv.reviewerUrl
+    : process.env.SSH_MCP_REVIEWER_URL;
+  if (reviewerUrlRaw) {
+    reviewer = new HttpCommandReviewer(
+      parseReviewerUrl(reviewerUrlRaw),
+      parseReviewerTimeout(argv.reviewerTimeoutMs),
+    );
+    console.error('Contextual command reviewer enabled');
+  } else if ('reviewerUrl' in argv) {
+    // A present but empty flag is a typo, unlike an absent/empty optional env var.
+    parseReviewerUrl(reviewerUrlRaw);
+  } else if ('reviewerTimeoutMs' in argv) {
+    throw new OperatorError('--reviewerTimeoutMs does nothing without --reviewerUrl or SSH_MCP_REVIEWER_URL.');
+  }
+
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {
     // capabilities moved from serverInfo to ServerOptions in SDK 1.30.
@@ -79,6 +100,7 @@ async function main() {
     registerTools(server, registry, policy, audit, {
       approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
       localPath,
+      reviewer,
     });
     registerResources(server, registry);
     return server;
@@ -88,10 +110,19 @@ async function main() {
 
   if (transportMode === 'http') {
     const { startHttpServer } = await import('./transport/http.js');
+    const tokenFile = process.env.SSH_MCP_BEARER_TOKEN_FILE;
+    let bearerToken = argv.bearerToken as string | undefined;
+    if (!bearerToken && tokenFile) {
+      try {
+        bearerToken = (await readFile(tokenFile, 'utf8')).trim();
+      } catch (err) {
+        throw new OperatorError(`Cannot read SSH_MCP_BEARER_TOKEN_FILE: ${(err as Error).message}`);
+      }
+    }
     await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
-      bearerToken: argv.bearerToken as string | undefined,
+      bearerToken,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
       authFailureLimit: parseFailureLimit(argv.authFailureLimit),
       trustProxy: flagEnabled(argv, 'trustProxy'),

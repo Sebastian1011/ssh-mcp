@@ -117,11 +117,11 @@ prod = ["read-only"]
     const policy = engineFor(config);
 
     // The one cell the operator wrote: admin/prod narrowed to read-only.
-    expect(policy.evaluate('npm install', getProfile(config, 'prod-web'), 'run-command').decision)
+    expect(policy.evaluate('touch /tmp/safe-command', getProfile(config, 'prod-web'), 'run-command').decision)
       .toBe('deny');
 
     // admin/staging is untouched — a role-depth merge would have wiped it.
-    expect(policy.evaluate('npm install', getProfile(config, 'staging-web'), 'run-command').decision)
+    expect(policy.evaluate('touch /tmp/safe-command', getProfile(config, 'staging-web'), 'run-command').decision)
       .toBe('allow');
 
     // And another role entirely is untouched.
@@ -180,7 +180,7 @@ ${profile}
 dev = ["read-only", "safe"]
 `));
     expect(
-      engineFor(after).evaluate('npm install', getProfile(after, 'deploy-box'), 'run-command').decision,
+      engineFor(after).evaluate('touch /tmp/safe-command', getProfile(after, 'deploy-box'), 'run-command').decision,
     ).toBe('allow');
   });
 

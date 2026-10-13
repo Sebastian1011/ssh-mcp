@@ -97,7 +97,7 @@ describe('run-command — approval gate', () => {
   it('runs a safe command without prompting', async () => {
     h = await createHarness();
     h.setApproval(false);
-    const res = await call('run-command', { command: 'npm install' });
+    const res = await call('run-command', { command: 'touch /tmp/safe-command' });
     expect(res.isError).toBeFalsy();
   });
 });
@@ -193,7 +193,7 @@ describe('audit records', () => {
   it('records an executed-but-failed command with its real decision', async () => {
     h = await createHarness();
     h.setExecResult({ stdout: '', stderr: 'boom', exitCode: 7 });
-    await call('run-command', { command: 'npm install' });
+    await call('run-command', { command: 'touch /tmp/failing-command' });
     const record = h.auditRecords.at(-1);
     expect(record.decision).toBe('allow');
     expect(record.exitCode).toBe(7);

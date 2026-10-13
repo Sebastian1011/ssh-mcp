@@ -308,7 +308,7 @@ auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
 via = "bastion"                     # ProxyJump — route through bastion profile
-group = "prod"                      # Policy tier: prod | staging | dev, or your own (see [policy])
+group = "prod"                      # Policy tier: prod | staging | dev | test, or custom
 workdir = "/var/www"
 trustedHostKey = "SHA256:..."       # Pin host key (optional)
 tty = false
@@ -431,15 +431,16 @@ The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cer
 
 ### Roles
 
-| Role | Dev | Staging | Prod |
-|------|-----|---------|------|
-| **viewer** | read-only | read-only | read-only |
-| **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
-| **admin** | all | all | read-only, safe, destructive |
+| Role | Dev | Test | Staging | Prod |
+|------|-----|------|---------|------|
+| **viewer** | read-only, safe | read-only, safe | read-only | read-only |
+| **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
+| **admin** | all | all | all | read-only, safe, destructive |
 
 Which column applies comes from the profile's `group`. Set it explicitly —
 without it the tier is guessed from the profile name (`prod`/`staging`/`dev`,
-`local`, `test`, `sandbox`), and **an unrecognised name resolves to `prod`**,
+`local`, `test`, `sandbox`; the latter names infer `dev`), and **an
+unrecognised name resolves to `prod`**,
 the strictest tier. A production host named `web-01` is therefore treated as
 production rather than silently getting dev permissions.
 
@@ -470,7 +471,7 @@ prod = ["read-only", "safe", "destructive", "privileged"]
 ```
 
 The merge is at role *and* tier depth. That block changes `admin` on `prod` and
-nothing else: `admin` on `staging` and `dev` keep their defaults, and `viewer`
+nothing else: `admin` on `staging`, `dev` and `test` keep their defaults, and `viewer`
 and `operator` are untouched. Roles and tiers the defaults have never heard of
 are added rather than rejected, which is what makes a custom `group` resolve to
 real bindings instead of falling back to the strictest tier:
@@ -492,6 +493,24 @@ never-allowed list rather than replacing it:
 [policy]
 denylist = ["^terraform\\s+destroy"]
 ```
+
+Production operation freezes are deterministic policy too. This example denies
+every non-read-only operation on profiles tagged `group = "prod"` during the
+configured local window, before OPA or the LLM reviewer is called:
+
+```toml
+[[policy.freezeWindows]]
+groups = ["prod"]
+timezone = "Asia/Shanghai"
+weekdays = [1, 2, 3, 4, 5]  # Monday=1, Sunday=7
+start = "09:00"
+end = "15:30"
+```
+
+Windows may cross midnight. ssh-mcp deliberately has no built-in exchange
+calendar, holiday list or assumed trading hours; configure the actual safety
+window for the venue. Read-only operations remain available. A group name that
+matches no profile, an invalid IANA timezone or an invalid time fails startup.
 
 Because role and tier names are free strings, nothing in the merge itself can
 tell a new custom role from a misspelling of an existing one. A cross-check at
@@ -650,6 +669,132 @@ deny if {
 }
 ```
 
+### Contextual LLM Command Review
+
+An optional reviewer can resolve contextual safety decisions after local policy and OPA:
+
+```bash
+ssh-mcp --reviewerUrl=http://127.0.0.1:8080 --reviewerTimeoutMs=30000
+```
+
+Review is disabled when neither `--reviewerUrl` nor `SSH_MCP_REVIEWER_URL` is
+set; the CLI value takes precedence. Local policy and OPA remain the enforcement
+point: their denials are final and are never sent to the reviewer. Read-only
+operations already allowed by policy and `close-session` skip review. Read-only
+operations requiring soft approval, such as under `ask-all`, are reviewed. For
+reviewed operations, `low` is paired with `approve`, `high` with `deny`, and uncertain cases use
+`escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` soft
+approval for a read-only or deterministically `safe` operation and records
+`approver: "llm-reviewer"`; deny
+recommends rejection and requests fresh human approval; escalate also requests
+fresh human approval. No LLM verdict is a final refusal. Destructive and privileged
+operations remain human-only even when the model approves. An invalid response,
+timeout or outage is treated as escalation, and escalated approval cannot reuse
+a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
+
+The `safe` class is a command-text classification, not a guarantee about a
+program's effects. Unknown binaries and some file-writing commands currently
+fall into `safe`; for example, `./deploy.sh` and `cp` are not inherently bounded
+by that label. Keep non-read-only production profiles disabled until their
+auto-approval scope has been reviewed against the commands they will actually run.
+
+Before transmission, commands are scanned for known secrets and high-entropy
+values. The request contains only the schema version, tool, command class,
+profile tier, read-only state and redacted command. It does not contain host
+addresses, SSH users, stdin, command output or file contents. Model summaries
+and findings are strictly bounded and redacted again before appearing in an
+approval prompt or audit record.
+
+The independent sidecar accepts `GET /healthz` and `POST /v1/review`. It requires
+`LLM_BASE_URL` and `LLM_MODEL`; `LLM_API_KEY` is optional. `LLM_PROTOCOL` selects
+`chat-completions` (the default) or `responses`. `LLM_TIMEOUT_MS` defaults to
+25000 and must be lower than ssh-mcp's reviewer timeout. Both protocols use
+OpenAI-compatible JSON mode with no tools, no retry and temperature zero. The sidecar
+includes the JSON Schema generated from its Zod validator in the fixed system prompt. The
+response is strict schema-versioned JSON containing
+`verdict`, `risk`, bounded summary/findings, model and reviewer policy version;
+contradictory verdict/risk pairs are rejected. No model is selected by default.
+
+With Compose, the reviewer has no host port and receives no SSH, configuration,
+audit or Docker-socket mount:
+
+```bash
+export SSH_MCP_REVIEWER_URL=http://llm-reviewer:8080
+export LLM_BASE_URL=http://host.docker.internal:11434/v1  # Ollama example
+export LLM_MODEL=your-reviewed-model
+docker compose --profile app --profile reviewer up --build
+```
+
+For vLLM, point `LLM_BASE_URL` at its `/v1` endpoint. For a cloud
+OpenAI-compatible service, use its `/v1` URL and set `LLM_API_KEY` in the
+reviewer environment. To turn review off, omit the `reviewer` profile and unset
+`SSH_MCP_REVIEWER_URL`.
+
+For Zhipu GLM through its OpenAI Responses-compatible endpoint:
+
+```bash
+export SSH_MCP_REVIEWER_URL=http://llm-reviewer:8080
+export LLM_BASE_URL=https://open.bigmodel.cn/api/v1
+export LLM_PROTOCOL=responses
+export LLM_MODEL=glm-5.3
+export LLM_API_KEY=your-zhipu-api-key
+export LLM_TIMEOUT_MS=25000
+docker compose --profile app --profile reviewer up --build
+```
+
+### Reviewer quality evaluation
+
+The normal test suite uses a deterministic fake model and verifies protocol and policy
+boundaries. The opt-in evaluator combines a 150-case project-native core with the complete,
+pinned 34,007-row Shell Safety v2 corpus. Each run selects a bounded, verdict-balanced
+sample across source splits, shells, categories and reasons. Dry-run validation is local
+and free:
+
+```bash
+npm run eval:reviewer -- --dry-run
+
+# Reproduce an exact 30-case selection.
+npm run eval:reviewer -- --dry-run --sample-size 30 --core-size 6 --seed release-candidate-1
+```
+
+Live evaluation is opt-in and never executes the commands in the dataset. It starts an
+ephemeral reviewer from the local `.env`, writes mode-0600 raw results under the ignored
+`artifacts/reviewer-eval/` directory, and reports raw model unsafe approval separately
+from the effective unsafe and safe auto-approval rates after the production `safe`-only
+gate. It also reports safe false-escalation, exact verdict/risk, availability,
+consistency and latency metrics:
+
+```bash
+# Small stratified smoke run: one approve, one escalate and one deny case.
+npm run eval:reviewer -- --live --env-file .env \
+  --sample-size 3 --core-size 1 --seed smoke-1 \
+  --sidecar-timeout-ms 110000 --concurrency 1
+
+# Default release-sized sample: 50 native and 250 compatible external cases.
+npm run eval:reviewer -- --live --env-file .env \
+  --seed release-2026-09-28 \
+  --sidecar-timeout-ms 110000 --concurrency 1
+```
+
+Use `--repeat 3` for a smaller release-gate subset when consistency matters, and `--tag`
+to isolate groups such as `prompt-injection`, `native` or `shell-safety-v2`. The evaluator
+generates and prints a random seed when `--seed` is omitted. Raw metadata records that
+seed, the pinned dataset revision, selection fingerprint and every selected case ID.
+The command class sent to the reviewer and stored with each result is recomputed by the
+production classifier; project-native cases fail validation if their declared class has
+drifted from that classifier.
+Unavailable attempts also record a bounded failure category such as
+`upstream-http-error`, `invalid-model-json`, `invalid-model-schema` or
+`inconsistent-verdict-risk`; provider bodies, model output, credentials and endpoint
+details are never copied into the result. A sidecar failure response retains the compatible
+`error: "model review unavailable"` field and adds the stable `category`, a safe human-readable
+`message`, and `upstreamStatus` only for upstream HTTP failures. An
+`invalid-model-schema` response additionally includes bounded `schemaIssue` and
+`schemaField` codes, never the rejected value or raw model output. The evaluator preserves
+and summarizes those codes. The complete corpus is
+validated before the first provider request. See
+`test/eval/reviewer/README.md` for data provenance and limitations.
+
 ---
 
 ## Security
@@ -741,6 +886,51 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret
 ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 ```
 
+For a local Docker Compose deployment using the profiles in `prod_config/ssh-mcp/config.toml`,
+use `prod_config/compose.yaml` with `prod_config/compose.env`. It binds the HTTP
+port to `127.0.0.1:3000`, mounts the current
+SSH agent socket, and reads a bearer token from `prod_config/ssh-mcp/http-token` through
+`SSH_MCP_BEARER_TOKEN_FILE` instead of putting the token in process arguments. The token
+file and `prod_config/ssh-mcp-audit/` are ignored by Git. The isolated `llm-reviewer`
+has no host port or SSH mount; configure `LLM_BASE_URL`, `LLM_MODEL`, and any required
+`LLM_API_KEY` in the ignored `prod_config/compose.env` file before startup. The
+default model timeout
+is 110 seconds and the MCP reviewer timeout is 120 seconds; a value set by
+`LLM_TIMEOUT_MS` in `prod_config/compose.env` overrides the model timeout. Its
+`/healthz` checks the
+sidecar process, not model connectivity. Create the token file with
+mode 0600 and the audit directory with mode 0700 before starting the service. Recreate
+the container when `SSH_AUTH_SOCK` changes, since the bind mount captures its old socket.
+The agent must hold a key accepted by the configured host; a successful host `ssh` command
+may instead have used its local identity file. Start with:
+
+```bash
+# Set SSH_AUTH_SOCK in prod_config/compose.env to the agent socket for these profiles.
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml up -d --build
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml ps
+```
+
+Both services should be healthy. A healthy reviewer only proves its HTTP process is
+running; validate the configured model separately before relying on review:
+
+```bash
+docker compose --env-file prod_config/compose.env -f prod_config/compose.yaml exec -T ssh-mcp node --input-type=module -e '
+import { HttpCommandReviewer } from "./build/reviewer/http-client.js";
+const result = await new HttpCommandReviewer("http://llm-reviewer:8080", 120000)
+  .review({ command: "echo deployment-review-probe", tool: "run-command",
+            commandClass: "safe", tier: "prod", readOnly: false });
+console.log({ status: result.status, verdict: result.verdict, model: result.model,
+              unavailableCode: result.unavailableCode });
+if (result.status !== "completed") process.exitCode = 1;
+'
+```
+
+This sends a synthetic review request but executes no SSH command. With the
+current six read-only `ask-all` profiles, a read-only command can run without a
+manual prompt when the reviewer approves it. A deny, escalation, or unavailable
+reviewer requests fresh human approval. Enabling non-read-only operations requires
+a separate, deliberate policy change.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`) |
@@ -787,8 +977,11 @@ disabling the check; only `0` turns it off.
 ## Docker
 
 ```bash
-# Build
-docker build -t ssh-mcp .
+# Build the enforcement server (the default final target)
+docker build --target ssh-mcp -t ssh-mcp .
+
+# Build the isolated reviewer when needed
+docker build --target reviewer -t ssh-mcp-reviewer .
 
 # Run (config file + env vars for credentials)
 docker run -i \
@@ -819,7 +1012,7 @@ Secrets are **never** passed as CLI arguments.
 | `--port` | 22 | Quick start: SSH port |
 | `--key` | — | Quick start: Path to private key |
 | `--workdir` | — | Quick start: Working directory for commands and sessions |
-| `--group` | prod | Quick start: Policy tier — `prod`, `staging` or `dev` |
+| `--group` | prod | Quick start: Policy tier — `prod`, `staging`, `dev` or `test` |
 | `--timeout` | 60000 | Command timeout in ms |
 | `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit; in a config file the same setting is `commandMaxChars = 0`) |
 | `--sessionMax` | 5 | Max concurrent sessions per connection |
@@ -841,6 +1034,8 @@ Secrets are **never** passed as CLI arguments.
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--opaFailClosed` | false | Refuse every command while OPA is unreachable, instead of falling back to local policy |
 | `--opaTimeoutMs` | 10000 | How long to wait for the OPA sidecar. Lower makes the fail-open cheaper to reach; higher makes an outage slower to notice |
+| `--reviewerUrl` | — (disabled) | HTTP(S) base URL for the contextual reviewer; `SSH_MCP_REVIEWER_URL` is the environment fallback |
+| `--reviewerTimeoutMs` | 30000 | Reviewer request timeout in ms (`1000..120000`) |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |

@@ -21,6 +21,8 @@
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",
     "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage",
     "coverage:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage test/unit/ test/property/",
+    "eval:reviewer": "npm run build && node scripts/eval-reviewer.mjs",
+    "eval:reviewer:data": "node scripts/vendor-reviewer-eval-data.mjs --check && node scripts/build-reviewer-eval-cases.mjs --check",
     "test:e2e": "npm run build && cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/e2e/"
   },
   "files": [

