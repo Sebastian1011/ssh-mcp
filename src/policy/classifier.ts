@@ -877,6 +877,13 @@ function hasHighImpactInvocation(command: string): boolean {
     if (binary === 'chmod' || binary === 'chown' || binary === 'chgrp') return true;
     if (binary === 'rm') return true;
     if (binary === 'export-csv') return true;
+    // Unknown Docker subcommands may run containers, mount host paths, or change
+    // images and services. Only the established inspection verbs stay out of
+    // the human-only class.
+    if (binary === 'docker' && ![
+      'ps', 'logs', 'inspect', 'stats', 'images', 'info', 'version', 'help',
+    ].includes(lowerArgs[0])) return true;
+    if (binary === 'docker-compose' || binary === 'rsync') return true;
     if (binary === 'npm' && invokes(['install', 'uninstall', 'update', 'publish'])) return true;
     if (binary === 'yarn' && invokes(['add', 'remove', 'upgrade', 'publish'])) return true;
     if (binary === 'pnpm' && invokes(['add', 'install', 'remove', 'update', 'publish'])) return true;

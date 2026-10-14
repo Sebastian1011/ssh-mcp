@@ -199,6 +199,21 @@ describe('contextual reviewer in the tool pipeline', () => {
     });
   });
 
+  it.each([
+    'docker run --privileged -v /:/host alpine sh',
+    'rsync --delete -a /tmp/src/ /srv/prod/',
+  ])('requires human approval for a reviewed high-impact command: %s', async (command) => {
+    const r = reviewer();
+    h = await createHarness({}, { reviewer: r });
+    await h.client.callTool({ name: 'run-command', arguments: { command } });
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+      review: { verdict: 'approve', risk: 'low' },
+    });
+  });
+
   it('raises an otherwise automatic destructive operation to human approval', async () => {
     const r = reviewer();
     h = await createHarness({ approvalPolicy: 'auto' }, { reviewer: r });
