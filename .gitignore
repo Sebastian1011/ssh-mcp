@@ -171,3 +171,4 @@ sonar-project.properties
 /artifacts/reviewer-eval/
 /prod_config/*
 !/prod_config/compose.yaml
+!/prod_config/sshmcp.sh

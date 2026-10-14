@@ -58,6 +58,9 @@ branch: feat/llm-command-review
 23. Live evaluation derives the command class with the production classifier, refuses
     project-native class drift, and reports raw model unsafe approval separately from
     effective unsafe and safe auto-approval after the `safe`-only production gate.
+24. Docker container operations and rsync transfers classify as `destructive` before
+    review, so a model approval cannot waive human approval. Existing Docker inspection
+    verbs remain read-only; other Docker subcommands default to `destructive`.
 
 ## Design
 
@@ -135,6 +138,9 @@ No `docs/architecture/` document currently exists for these modules.
 - The classifier's fallback `safe` class includes unknown binaries and some
   file-writing commands. This is a remaining auto-approval risk for any
   non-read-only profile; such deployment needs a separately reviewed scope.
+- Conservative Docker and rsync classification adds human prompts for uncommon
+  inspection or dry-run forms, but prevents model approval from authorizing
+  container control or target writes.
 - Session release is intentionally excluded because refusing it can leave a remote command
   running.
 - Live model scores are provider-, model- and prompt-version specific. They are recorded as
