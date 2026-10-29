@@ -12,6 +12,17 @@ const MAX_BODY_SIZE = 1_048_576; // 1MB
 /** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
 const MAX_SESSIONS = 64;
 
+/**
+ * How long a session may go without a request before the server closes it. Most clients
+ * (Claude Code, mcp-remote) never send the DELETE that frees a session, so without this
+ * the table fills with the ghosts of exited clients and new ones are refused with 503 —
+ * measured after six days of uptime, 64/64 slots leaked.
+ */
+export const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
+
+/** How often the sweep looks for idle sessions. The lazy sweep in the request path makes this the backstop, not the mechanism. */
+const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
 /** How many failed auth attempts one client may make per minute. 0 disables the check. */
 export const DEFAULT_AUTH_FAILURE_LIMIT = 10;
 
@@ -242,6 +253,12 @@ export interface HttpTransportOpts {
    * presents a different hostname.
    */
   allowedHosts?: string[];
+  /**
+   * How long a session may go without a request before the server closes it.
+   * Defaults to `DEFAULT_SESSION_IDLE_MS`; 0 disables eviction (the previous
+   * behaviour, where slots were only freed by an explicit DELETE).
+   */
+  sessionIdleMs?: number;
 }
 
 function jsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
@@ -302,7 +319,41 @@ export async function startHttpServer(
     ? opts.allowedHosts
     : [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  interface SessionEntry {
+    transport: StreamableHTTPServerTransport;
+    lastActive: number;
+  }
+  const transports = new Map<string, SessionEntry>();
+
+  const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+
+  /**
+   * Close every session that has gone longer than the idle timeout without a request.
+   *
+   * Closing goes through `transport.close()` — which fires `onsessionclosed`/`onclose`
+   * and so removes the entry from the map — but a close that throws still deletes the
+   * entry here: a leaked slot is the exact bug this sweep exists to fix, so it must not
+   * depend on teardown succeeding. `void`ed rather than awaited per entry, so one
+   * slow-to-close stream cannot stall the others.
+   */
+  function sweepIdleSessions(): void {
+    if (sessionIdleMs <= 0) return;
+    const now = Date.now();
+    for (const [id, entry] of transports) {
+      if (now - entry.lastActive <= sessionIdleMs) continue;
+      transports.delete(id);
+      void entry.transport.close().catch(() => {
+        // close() already best-effort; the entry is gone either way.
+      });
+      console.error(`Closed idle MCP session ${id} (no request for ${Math.round((now - entry.lastActive) / 1000)}s)`);
+    }
+  }
+
+  // The backstop for a server with no traffic: the lazy sweep in `resolveTransport`
+  // only runs when a request arrives, and an idle table is exactly when none does.
+  // unref'd so the timer never holds the process (or a test run) open.
+  const sweepTimer = setInterval(sweepIdleSessions, SESSION_SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
 
   /** Route to the session's transport, or start a new session on `initialize`. */
   async function resolveTransport(
@@ -314,7 +365,10 @@ export async function startHttpServer(
 
     if (sessionId) {
       const existing = transports.get(sessionId);
-      if (existing) return existing;
+      if (existing) {
+        existing.lastActive = Date.now();
+        return existing.transport;
+      }
       jsonRpcError(res, 404, -32001, 'Session not found or expired. Re-initialize to obtain a new session.');
       return null;
     }
@@ -325,6 +379,10 @@ export async function startHttpServer(
       return null;
     }
 
+    // Lazily, before the cap: a leaked session must never be the reason a real client
+    // is refused. After this, 503 means what it says — 64 genuinely active sessions.
+    sweepIdleSessions();
+
     if (transports.size >= MAX_SESSIONS) {
       jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
       return null;
@@ -334,7 +392,7 @@ export async function startHttpServer(
       sessionIdGenerator: () => randomUUID(),
       enableDnsRebindingProtection: true,
       allowedHosts,
-      onsessioninitialized: (id) => { transports.set(id, transport); },
+      onsessioninitialized: (id) => { transports.set(id, { transport, lastActive: Date.now() }); },
       onsessionclosed: (id) => { transports.delete(id); },
     });
     // Covers transport teardown that isn't a DELETE (client disconnect, error).
@@ -549,6 +607,9 @@ export async function startHttpServer(
       }
       if (authFailureLimiter) {
         console.error(`Auth failure limit: ${authFailureLimit}/min per client`);
+      }
+      if (sessionIdleMs > 0) {
+        console.error(`Session idle timeout: ${Math.round(sessionIdleMs / 60_000)}min`);
       }
       resolve();
     });

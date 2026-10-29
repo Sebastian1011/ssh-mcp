@@ -56,11 +56,11 @@ function startTestServer(): Promise<Server> {
   });
 }
 
-function httpRequest(method: string, path: string, headers: Record<string, string> = {}, body?: string): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
+function httpRequest(method: string, path: string, headers: Record<string, string> = {}, body?: string, port: number = HTTP_PORT): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: HTTP_HOST,
-      port: HTTP_PORT,
+      port,
       path,
       method,
       headers,
@@ -774,6 +774,90 @@ describe('HTTP transport — the two 429s are distinguishable', () => {
       statuses.push((await bareRequest(port, '/status', { authorization: `Bearer ${BEARER}` })).status);
     }
     expect(statuses).toEqual([200, 200, 200]);
+  });
+});
+
+/**
+ * Idle eviction. Sessions whose client vanished without a DELETE used to hold their slot
+ * forever — after six days of uptime all 64 were leaked and every new client got 503.
+ * The sweep runs lazily on a new initialize (so the test drives it with one) and on a
+ * timer; both call the same function, so the lazy path stands in for the timer here.
+ */
+describe('HTTP transport — idle sessions are evicted', () => {
+  const PORT = 18413;
+  // Small enough to wait out in a test, large enough that a refresh has margin.
+  const IDLE_MS = 300;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    // A fresh server per session, as the real entrypoint builds them — an McpServer binds
+    // to one transport, and this suite completes initialize, unlike the ones above.
+    await startHttpServer(() => new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    ), {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: 0, sessionIdleMs: IDLE_MS, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  const headers = {
+    authorization: `Bearer ${BEARER}`,
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+  };
+  const INIT = JSON.stringify({
+    jsonrpc: '2.0', id: 0, method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26', capabilities: {},
+      clientInfo: { name: 'evict-test', version: '0.0.0' },
+    },
+  });
+
+  /** One initialize round-trip; resolves to the assigned session id. */
+  const initSession = async () => {
+    const res = await httpRequest('POST', '/', headers, INIT, PORT);
+    expect(res.status).toBe(200);
+    const id = res.headers['mcp-session-id'];
+    expect(typeof id).toBe('string');
+    return id as string;
+  };
+
+  const ping = (sessionId: string) =>
+    httpRequest(
+      'POST', '/',
+      { ...headers, 'mcp-session-id': sessionId },
+      JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      PORT,
+    );
+
+  it('closes a session that has gone quiet past the idle timeout', async () => {
+    const idle = await initSession();
+    await new Promise((r) => setTimeout(r, IDLE_MS + 100));
+    // A new initialize triggers the lazy sweep; the stale slot is freed rather than held,
+    // so this succeeds instead of the 503 that reported the leak.
+    const fresh = await initSession();
+    expect(fresh).not.toBe(idle);
+    // The evicted session now speaks the existing re-initialize contract.
+    expect((await ping(idle)).status).toBe(404);
+    expect((await ping(fresh)).status).toBe(200);
+  });
+
+  it('keeps a session that is still making requests', async () => {
+    const id = await initSession();
+    // Half the timeout, then a request: lastActive resets here.
+    await new Promise((r) => setTimeout(r, IDLE_MS / 2));
+    expect((await ping(id)).status).toBe(200);
+    await new Promise((r) => setTimeout(r, IDLE_MS / 2));
+    // Another initialize sweeps, but this session is IDLE_MS/2 old, not IDLE_MS.
+    await initSession();
+    expect((await ping(id)).status).toBe(200);
   });
 });
 
