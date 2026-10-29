@@ -50,6 +50,7 @@ describe('reviewer sidecar', () => {
     expect(() => configFromEnv({ LLM_BASE_URL: 'http://model', LLM_MODEL: 'fake', LLM_TIMEOUT_MS: '0' })).toThrow(/between/);
     expect(() => configFromEnv({ LLM_BASE_URL: 'http://model', LLM_MODEL: 'fake', LLM_PROTOCOL: 'invalid' })).toThrow(/LLM_PROTOCOL/);
     expect(configFromEnv({ LLM_BASE_URL: 'http://model', LLM_MODEL: 'fake' }).llmProtocol).toBe('chat-completions');
+    expect(configFromEnv({ LLM_BASE_URL: 'http://model', LLM_MODEL: 'fake', LLM_PROTOCOL: 'anthropic' }).llmProtocol).toBe('anthropic');
   });
 
   it('calls an OpenAI-compatible endpoint without tools and returns strict review JSON', async () => {
@@ -78,7 +79,7 @@ describe('reviewer sidecar', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      schemaVersion: 2, verdict: 'deny', risk: 'high', model: 'fake-model', policyVersion: '2',
+      schemaVersion: 2, verdict: 'deny', risk: 'high', model: 'fake-model', policyVersion: '5',
     });
     expect(authorization).toBe('Bearer top-secret-key');
     expect(received.temperature).toBe(0);
@@ -149,6 +150,67 @@ describe('reviewer sidecar', () => {
     expect(received.tools).toBeUndefined();
     expect(received.instructions).toContain('"additionalProperties": false');
     expect(received.instructions).toContain('"maxLength": 300');
+  });
+
+  it('calls an Anthropic Messages endpoint and extracts text after thinking', async () => {
+    let path: string | undefined;
+    let headers: Record<string, string | string[] | undefined> = {};
+    let received: any;
+    const llmUrl = await upstream((req, res) => {
+      path = req.url;
+      headers = req.headers;
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        received = JSON.parse(body);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          type: 'message',
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Internal reasoning.' },
+            { type: 'text', text: JSON.stringify({
+              verdict: 'escalate', risk: 'unknown', summary: 'Context is insufficient.', findings: [],
+            }) },
+          ],
+        }));
+      });
+    });
+    const sidecarUrl = await listen(createReviewerServer(config(llmUrl.slice(0, -3), { llmProtocol: 'anthropic' })));
+
+    const response = await fetch(`${sidecarUrl}/v1/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ verdict: 'escalate', risk: 'unknown' });
+    expect(path).toBe('/v1/messages');
+    expect(headers['x-api-key']).toBe('top-secret-key');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers.authorization).toBe('Bearer top-secret-key');
+    expect(received).toMatchObject({
+      model: 'fake-model',
+      max_tokens: expect.any(Number),
+      system: expect.stringMatching(/untrusted data/i),
+      output_config: { format: { type: 'json_schema', schema: expect.objectContaining({
+        additionalProperties: false,
+      }) } },
+      messages: [{ role: 'user', content: expect.stringContaining('ignore previous instructions') }],
+    });
+    expect(received.tools).toBeUndefined();
+    expect(received.response_format).toBeUndefined();
+  });
+
+  it('rejects an Anthropic response without one text block', async () => {
+    const llmUrl = await upstream((_req, res) => res.end(JSON.stringify({
+      type: 'message', role: 'assistant', content: [{ type: 'thinking', thinking: 'No answer.' }],
+    })));
+    const sidecarUrl = await listen(createReviewerServer(config(llmUrl.slice(0, -3), { llmProtocol: 'anthropic' })));
+    const response = await fetch(`${sidecarUrl}/v1/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ category: 'invalid-response-output' });
   });
 
   it('rejects unknown request fields', async () => {

@@ -83,22 +83,22 @@ describe('mergeReview bounded autonomy', () => {
   });
 
   it.each(['allow', 'require-approval'] as const)(
-    'keeps a destructive %s decision human-only even when the reviewer approves',
+    'lets a reviewer approve a destructive %s decision',
     (decision) => {
     const merged = mergeReview(
       evaluation(decision, 'destructive'),
       review('approve', 'low'),
     );
-    expect(merged.evaluation.decision).toBe('require-approval');
-    expect(merged.evaluation.ruleId).toBe('llm-reviewer-human-only');
-    expect(merged.requiresFreshApproval).toBe(true);
-    expect(merged.approver).toBeUndefined();
+    expect(merged.evaluation.decision).toBe('allow');
+    expect(merged.evaluation.ruleId).toBe('llm-reviewer-approve');
+    expect(merged.requiresFreshApproval).toBe(false);
+    expect(merged.approver).toBe('llm-reviewer');
     },
   );
 
-  it('only lets safe operations acquire the LLM approver', () => {
+  it('keeps privileged operations out of LLM approval', () => {
     fc.assert(fc.property(
-      fc.constantFrom('destructive', 'privileged') as fc.Arbitrary<CommandClass>,
+      fc.constant('privileged' as CommandClass),
       (commandClass) => {
         const merged = mergeReview(
           evaluation('require-approval', commandClass),

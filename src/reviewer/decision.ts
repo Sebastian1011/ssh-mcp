@@ -9,9 +9,8 @@ export interface ReviewMerge {
 }
 
 /**
- * Let the contextual reviewer resolve only decisions that passed deterministic
- * authorization and were classified read-only or safe. Destructive and privileged
- * operations remain human-only even when approved.
+ * Let the contextual reviewer resolve decisions that passed deterministic
+ * authorization. Privileged operations remain human-only even when approved.
  */
 export function mergeReview(
   evaluation: PolicyEvaluation,
@@ -33,13 +32,13 @@ export function mergeReview(
     };
   }
 
-  if (evaluation.commandClass === 'destructive' || evaluation.commandClass === 'privileged') {
+  if (evaluation.commandClass === 'privileged') {
     return {
       evaluation: {
         ...evaluation,
         decision: 'require-approval',
         ruleId: 'llm-reviewer-human-only',
-        reason: `${evaluation.commandClass === 'privileged' ? 'Privileged' : 'Destructive'} operations require human approval`,
+        reason: 'Privileged operations require human approval',
       },
       requiresFreshApproval: true,
     };

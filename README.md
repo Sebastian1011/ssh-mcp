@@ -546,8 +546,8 @@ never widen. Widening happens here or not at all.
 Every command is classified before execution:
 
 - **read-only**: Allowlisted commands (`ls`, `cat`, `grep`, `df`, `stat`, `systemctl status`, ...)
-- **safe**: Non-destructive mutations (`npm install`, `git pull`, ...)
-- **destructive**: mutations that need approval (`rm -rf /tmp/build`, ...)
+- **safe**: Commands without a recognized high-impact pattern (`git pull`, `touch`, ...); this label does not guarantee bounded effects
+- **destructive**: recognized high-impact operations (`rm`, `systemctl restart`, package installs, `curl`, ...)
 - **privileged**: `sudo`, `su`, `doas`, `pkexec`
 
 A separate **forbidden** list is never allowed, whatever the role or approval
@@ -559,14 +559,12 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 ### Approval Modes
 
 - `auto` — no prompts (dev only!)
-- `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
-  outside the never-allowed list, `destructive` is one `rm -rf /path` pattern, `find` with a
-  write/exec flag, an unresolvable command word, a program handed to an interpreter this
-  server cannot read (`python3 -c`, `perl -e`, `node -e`, a program arriving on a pipe —
-  but not `awk`, whose program is not read), and `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
-  prompts. Ordinary writes, service control and signals do not. See
-  [SECURITY.md](./SECURITY.md) before relying on this in production.
-- `ask-all` — prompt for every command
+- `ask-destructive` — require approval for destructive/privileged commands (default).
+  With a reviewer configured, allowed read-only and safe commands skip review; a reviewer
+  `approve` can authorize destructive commands, while `deny`, `escalate` or reviewer
+  unavailability requires fresh human approval. Privileged commands remain human-only.
+  See [ADR-004](./docs/decisions/ADR-004-reviewer-destructive-approval.md) for the risk trade-off.
+- `ask-all` — require approval for every command; the reviewer can discharge eligible approvals
 - `deny` — reject destructive/privileged commands outright (no prompt)
 
 ### Approval Grants (just-in-time)
@@ -679,24 +677,23 @@ ssh-mcp --reviewerUrl=http://127.0.0.1:8080 --reviewerTimeoutMs=30000
 
 Review is disabled when neither `--reviewerUrl` nor `SSH_MCP_REVIEWER_URL` is
 set; the CLI value takes precedence. Local policy and OPA remain the enforcement
-point: their denials are final and are never sent to the reviewer. Read-only
-operations already allowed by policy and `close-session` skip review. Read-only
-operations requiring soft approval, such as under `ask-all`, are reviewed. For
-reviewed operations, `low` is paired with `approve`, `high` with `deny`, and uncertain cases use
-`escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` soft
-approval for a read-only or deterministically `safe` operation and records
-`approver: "llm-reviewer"`; deny
-recommends rejection and requests fresh human approval; escalate also requests
-fresh human approval. No LLM verdict is a final refusal. Destructive and privileged
-operations remain human-only even when the model approves. An invalid response,
-timeout or outage is treated as escalation, and escalated approval cannot reuse
-a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
+point: their denials are final and are never sent to the reviewer. Allowed
+read-only and safe commands and `close-session` skip review. Commands requiring
+approval, plus destructive and privileged commands under `auto`, are reviewed.
+For reviewed operations, `low` is paired with `approve`, `high` with `deny`, and
+uncertain cases use `escalate` with `medium` or `unknown`. A completed `approve`
+can authorize a destructive command or discharge an `ask-all` soft approval;
+the audit records `approver: "llm-reviewer"`. Deny and escalate request fresh
+human approval. Privileged operations remain human-only even when the model
+approves. An invalid response, timeout or outage is treated as escalation,
+and escalated approval cannot reuse a JIT grant. Without a reviewer URL,
+existing approval behavior is unchanged.
 
 The `safe` class is a command-text classification, not a guarantee about a
 program's effects. Unknown binaries and some file-writing commands currently
 fall into `safe`; for example, `./deploy.sh` and `cp` are not inherently bounded
-by that label. Keep non-read-only production profiles disabled until their
-auto-approval scope has been reviewed against the commands they will actually run.
+by that label. Review the commands allowed by non-read-only production profiles:
+safe commands now run without contextual review.
 
 Before transmission, commands are scanned for known secrets and high-entropy
 values. The request contains only the schema version, tool, command class,
@@ -707,9 +704,10 @@ approval prompt or audit record.
 
 The independent sidecar accepts `GET /healthz` and `POST /v1/review`. It requires
 `LLM_BASE_URL` and `LLM_MODEL`; `LLM_API_KEY` is optional. `LLM_PROTOCOL` selects
-`chat-completions` (the default) or `responses`. `LLM_TIMEOUT_MS` defaults to
-25000 and must be lower than ssh-mcp's reviewer timeout. Both protocols use
-OpenAI-compatible JSON mode with no tools, no retry and temperature zero. The sidecar
+`chat-completions` (the default), `responses`, or `anthropic`. `LLM_TIMEOUT_MS` defaults to
+25000 and must be lower than ssh-mcp's reviewer timeout. The OpenAI-compatible
+protocols use JSON mode and temperature zero; Anthropic uses Messages with a
+JSON Schema output format. All three use no tools and no retry. The sidecar
 includes the JSON Schema generated from its Zod validator in the fixed system prompt. The
 response is strict schema-versioned JSON containing
 `verdict`, `risk`, bounded summary/findings, model and reviewer policy version;
@@ -724,6 +722,17 @@ export LLM_BASE_URL=http://host.docker.internal:11434/v1  # Ollama example
 export LLM_MODEL=your-reviewed-model
 docker compose --profile app --profile reviewer up --build
 ```
+
+For Kimi K2.7 Code through Moonshot's Anthropic-compatible Messages endpoint:
+
+```bash
+export LLM_BASE_URL=https://api.moonshot.cn/anthropic  # China-region API key
+export LLM_PROTOCOL=anthropic
+export LLM_MODEL=kimi-k2.7-code
+export LLM_API_KEY=your-moonshot-api-key
+```
+
+Use `https://api.moonshot.ai/anthropic` with a global-region API key.
 
 For vLLM, point `LLM_BASE_URL` at its `/v1` endpoint. For a cloud
 OpenAI-compatible service, use its `/v1` URL and set `LLM_API_KEY` in the
@@ -760,8 +769,10 @@ npm run eval:reviewer -- --dry-run --sample-size 30 --core-size 6 --seed release
 Live evaluation is opt-in and never executes the commands in the dataset. It starts an
 ephemeral reviewer from the local `.env`, writes mode-0600 raw results under the ignored
 `artifacts/reviewer-eval/` directory, and reports raw model unsafe approval separately
-from the effective unsafe and safe auto-approval rates after the production `safe`-only
-gate. It also reports safe false-escalation, exact verdict/risk, availability,
+from the effective unsafe and safe auto-approval rates under the production
+`ask-destructive` gate. This metric uses command class and forbidden rules; it does
+not simulate role bindings or optional OPA. It also reports safe false-escalation,
+exact verdict/risk, availability,
 consistency and latency metrics:
 
 ```bash
@@ -926,10 +937,10 @@ if (result.status !== "completed") process.exitCode = 1;
 ```
 
 This sends a synthetic review request but executes no SSH command. With the
-current six read-only `ask-all` profiles, a read-only command can run without a
-manual prompt when the reviewer approves it. A deny, escalation, or unavailable
-reviewer requests fresh human approval. Enabling non-read-only operations requires
-a separate, deliberate policy change.
+current six `ask-destructive` production profiles, policy-allowed read-only and
+safe commands skip review. An approved destructive command may run without a
+manual prompt; a deny, escalation, or unavailable reviewer requests fresh human
+approval. Privileged commands remain subject to the role binding and human gate.
 
 | Flag | Default | Description |
 |------|---------|-------------|

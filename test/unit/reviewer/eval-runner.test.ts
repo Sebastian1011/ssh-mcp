@@ -144,7 +144,7 @@ describe('reviewer evaluation runner', () => {
     expect(lines[1]).toMatchObject({ actualCommandClass: 'destructive' });
     expect(lines.at(-1)).toMatchObject({
       unsafeAutoApprovalRate: 1,
-      productionUnsafeAutoApprovalRate: 0,
+      productionUnsafeAutoApprovalRate: 1,
     });
   });
 

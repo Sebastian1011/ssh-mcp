@@ -29,6 +29,15 @@ describe('contextual reviewer in the tool pipeline', () => {
     expect(r.review).not.toHaveBeenCalled();
   });
 
+  it('skips a policy-allowed safe command and its model cost', async () => {
+    const r = reviewer();
+    h = await createHarness({ approvalPolicy: 'ask-destructive' }, { reviewer: r });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    expect(r.review).not.toHaveBeenCalled();
+    expect(h.approvalPrompts()).toBe(0);
+    expect(h.execCalls).toHaveLength(1);
+  });
+
   it('lets reviewer approval discharge ask-all for a read-only command', async () => {
     const r = reviewer();
     h = await createHarness({ readOnly: true, approvalPolicy: 'ask-all' }, { reviewer: r });
@@ -86,7 +95,7 @@ describe('contextual reviewer in the tool pipeline', () => {
     });
   });
 
-  it('raises medium risk to approval and shows the findings', async () => {
+  it('raises a destructive reviewer escalation to approval and shows the findings', async () => {
     const r = reviewer({
       verdict: 'escalate',
       risk: 'medium',
@@ -94,7 +103,7 @@ describe('contextual reviewer in the tool pipeline', () => {
       findings: [{ category: 'service-impact', severity: 'medium', message: 'No rollback step.' }],
     });
     h = await createHarness({}, { reviewer: r });
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
     expect(h.approvalPrompts()).toBe(1);
     expect(h.approvalMessages()[0]).toContain('medium risk');
     expect(h.approvalMessages()[0]).toContain('No rollback step.');
@@ -105,16 +114,16 @@ describe('contextual reviewer in the tool pipeline', () => {
     });
   });
 
-  it('raises reviewer failure to approval', async () => {
+  it('raises destructive reviewer failure to approval', async () => {
     const r = reviewer({ status: 'unavailable', verdict: 'escalate', risk: 'unknown', unavailableCode: 'timeout' });
     h = await createHarness({}, { reviewer: r });
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
     expect(h.approvalMessages()[0]).toContain('unavailable (timeout)');
   });
 
   it('does not call the reviewer after the command quota is exhausted', async () => {
     const r = reviewer();
-    h = await createHarness({ commandQuotaPerDay: 1 }, { reviewer: r });
+    h = await createHarness({ approvalPolicy: 'ask-all', commandQuotaPerDay: 1 }, { reviewer: r });
 
     await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/first' } });
     const blocked = await h.client.callTool({
@@ -128,7 +137,7 @@ describe('contextual reviewer in the tool pipeline', () => {
 
   it('releases reserved quota when the human declines an escalation', async () => {
     const r = reviewer({ verdict: 'escalate', risk: 'medium' });
-    h = await createHarness({ commandQuotaPerDay: 1 }, { reviewer: r });
+    h = await createHarness({ approvalPolicy: 'ask-all', commandQuotaPerDay: 1 }, { reviewer: r });
     h.setApproval(false);
 
     await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/declined' } });
@@ -148,15 +157,15 @@ describe('contextual reviewer in the tool pipeline', () => {
   ] as const)('does not reuse JIT grants for reviewer %s approval', async (verdict, risk) => {
     const r = reviewer({ verdict, risk });
     h = await createHarness({}, { reviewer: r, approvalGrantTtlMs: 60_000 });
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
     expect(h.approvalPrompts()).toBe(2);
   });
 
   it('sends an LLM denial to a fresh human approval that can override it', async () => {
     const r = reviewer({ verdict: 'deny', risk: 'high', summary: 'Unsafe target scope.' });
     h = await createHarness({}, { reviewer: r });
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
     expect(h.approvalPrompts()).toBe(1);
     expect(h.approvalMessages()[0]).toContain('deny (high risk)');
     expect(h.execCalls).toHaveLength(1);
@@ -170,7 +179,7 @@ describe('contextual reviewer in the tool pipeline', () => {
     const r = reviewer({ verdict: 'deny', risk: 'high', summary: 'Unsafe target scope.' });
     h = await createHarness({}, { reviewer: r });
     h.setApproval(false);
-    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
     expect(h.approvalPrompts()).toBe(1);
     expect(h.execCalls).toHaveLength(0);
     expect(h.auditRecords.at(-1)).toMatchObject({
@@ -189,38 +198,41 @@ describe('contextual reviewer in the tool pipeline', () => {
     });
   });
 
-  it('keeps destructive operations human-only after an LLM approval', async () => {
+  it('lets a model-approved destructive operation execute without a human prompt', async () => {
     const r = reviewer();
     h = await createHarness({}, { reviewer: r });
     await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl restart demo' } });
-    expect(h.approvalPrompts()).toBe(1);
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(h.approvalPrompts()).toBe(0);
+    expect(h.execCalls).toHaveLength(1);
     expect(h.auditRecords.at(-1)).toMatchObject({
-      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+      decision: 'allow', ruleId: 'llm-reviewer-approve', approver: 'llm-reviewer',
     });
   });
 
   it.each([
     'docker run --privileged -v /:/host alpine sh',
     'rsync --delete -a /tmp/src/ /srv/prod/',
-  ])('requires human approval for a reviewed high-impact command: %s', async (command) => {
+  ])('lets a model approval execute a reviewed high-impact command: %s', async (command) => {
     const r = reviewer();
     h = await createHarness({}, { reviewer: r });
     await h.client.callTool({ name: 'run-command', arguments: { command } });
     expect(r.review).toHaveBeenCalledOnce();
-    expect(h.approvalPrompts()).toBe(1);
+    expect(h.approvalPrompts()).toBe(0);
     expect(h.auditRecords.at(-1)).toMatchObject({
-      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+      decision: 'allow', ruleId: 'llm-reviewer-approve', approver: 'llm-reviewer',
       review: { verdict: 'approve', risk: 'low' },
     });
   });
 
-  it('raises an otherwise automatic destructive operation to human approval', async () => {
+  it('reviews an otherwise automatic destructive operation', async () => {
     const r = reviewer();
     h = await createHarness({ approvalPolicy: 'auto' }, { reviewer: r });
     await h.client.callTool({ name: 'run-command', arguments: { command: 'systemctl reload demo' } });
-    expect(h.approvalPrompts()).toBe(1);
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(h.approvalPrompts()).toBe(0);
     expect(h.auditRecords.at(-1)).toMatchObject({
-      decision: 'require-approval', ruleId: 'llm-reviewer-human-only', approver: 'mcp-client',
+      decision: 'allow', ruleId: 'llm-reviewer-approve', approver: 'llm-reviewer',
     });
   });
 

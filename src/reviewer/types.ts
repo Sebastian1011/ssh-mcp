@@ -1,7 +1,7 @@
 import type { CommandClass } from '../types.js';
 
 export const REVIEW_SCHEMA_VERSION = 2 as const;
-export const REVIEW_POLICY_VERSION = '2';
+export const REVIEW_POLICY_VERSION = '5';
 
 export type ReviewRisk = 'low' | 'medium' | 'high' | 'unknown';
 export type ReviewStatus = 'completed' | 'unavailable';
