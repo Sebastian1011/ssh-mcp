@@ -10,8 +10,12 @@ case ${1:-} in
   stop)
     exec docker compose --env-file "$script_dir/compose.env" -f "$script_dir/compose.yaml" down
     ;;
+  reload)
+    printf 'Restarting ssh-mcp to reload config.toml; existing SSH/MCP sessions will disconnect.\n' >&2
+    exec docker compose --env-file "$script_dir/compose.env" -f "$script_dir/compose.yaml" restart ssh-mcp
+    ;;
   *)
-    printf 'Usage: %s {start|stop}\n' "$0" >&2
+    printf 'Usage: %s {start|stop|reload}\n' "$0" >&2
     exit 2
     ;;
 esac
