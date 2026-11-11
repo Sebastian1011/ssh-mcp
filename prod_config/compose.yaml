@@ -25,6 +25,7 @@ services:
     volumes:
       - ./ssh-mcp:/config:ro
       - ./ssh-mcp-audit:/data/ssh-mcp
+      - ./ssh-mcp-transfers:/transfers
       - ${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must point to a running SSH agent}:/run/ssh-agent.sock
     tmpfs:
       - /tmp:mode=1777
