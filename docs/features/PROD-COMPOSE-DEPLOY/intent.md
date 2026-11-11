@@ -30,3 +30,11 @@ Public exposure, remote mutations, and converting unsupported OpenSSH directives
 ## Open questions
 
 None.
+
+## Streaming file transfers (2026-11-11)
+
+The operator requested enabling streaming downloads after production rejected them
+because no local transfer directory was configured. Downloads must persist across
+container replacement and stay within a private directory. Existing remote access
+policy and reviewer isolation remain in force. Acceptance includes a bounded SFTP
+download of a public system information file without changing the remote host.
