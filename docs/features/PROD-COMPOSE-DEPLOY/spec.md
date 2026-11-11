@@ -39,3 +39,22 @@ ADR-001, ADR-002, and ADR-003 govern sidecar isolation and reviewer authority.
 - Authenticated MCP discovery lists all six profiles.
 - A read-only remote command succeeds on `sh_zx_zy`, or a precise external authentication/network blocker is reported.
 - A synthetic, non-executing review request reaches the configured model and returns a completed verdict, or a precise provider blocker is reported.
+
+## Streaming transfer configuration (2026-11-11)
+
+- Set `defaults.transferRoot = "/transfers"` in the ignored production TOML.
+- Bind `prod_config/ssh-mcp-transfers` to `/transfers` read-write in the MCP
+  container only. The directory is owned by the service UID/GID (currently
+  `1000:1000`) with mode `0700`, and is separate from configuration and audit data.
+- Keep the existing defaults: 268435456 bytes per transfer and 300000 ms without
+  progress. Setting the root enables both existing streaming download and upload
+  tools; remote writes still pass through the existing authorization pipeline.
+- Recreate only the MCP container using its existing image to load the setting and
+  mount. Existing SSH/MCP sessions disconnect during replacement.
+- Confirm health, effective settings, directory ownership and mode, MCP discovery,
+  and one download of `/etc/os-release` on `sh_zx` with `overwrite=false`. Check the
+  resulting host file and remove only that verification file afterwards. Reject a
+  destination outside `/transfers` in the local path gate.
+
+This is deployment configuration for existing tools; no application or policy
+change is needed. ADR-004 governs the current reviewer approval behavior.
